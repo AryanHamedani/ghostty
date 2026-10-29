@@ -88,6 +88,8 @@ pub const Shaper = struct {
 
     /// Scratch reused for terminal bidi layout resolution.
     bidi_layout_scratch: itijah.VisualLayoutScratch = .{},
+    /// Scratch for the run iterator's per-cell font lookups.
+    font_info_scratch: std.ArrayListUnmanaged(font.shape.RunIterator.FontInfo) = .{},
 
     const CellBuf = std.ArrayListUnmanaged(font.shape.Cell);
     const CodepointList = std.ArrayListUnmanaged(Codepoint);
@@ -255,6 +257,7 @@ pub const Shaper = struct {
         self.typesetter_attr_dict.release();
         self.typesetter_attr_dict_rtl.release();
         self.bidi_layout_scratch.deinit(self.alloc);
+        self.font_info_scratch.deinit(self.alloc);
 
         {
             for (self.cached_fonts.items) |ft| {
@@ -792,6 +795,10 @@ pub const Shaper = struct {
 
         pub fn bidiLayoutScratch(self: RunIteratorHook) *itijah.VisualLayoutScratch {
             return &self.shaper.bidi_layout_scratch;
+        }
+
+        pub fn fontInfoScratch(self: RunIteratorHook) *std.ArrayListUnmanaged(font.shape.RunIterator.FontInfo) {
+            return &self.shaper.font_info_scratch;
         }
     };
 

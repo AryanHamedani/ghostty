@@ -110,6 +110,11 @@ pub const RunIterator = struct {
                 .{};
             const run_font_style = fontStyleForStyle(style);
 
+            // Font lookups take the grid lock and hash the codepoint, so the
+            // boundary pass records them for the shaping pass to reuse.
+            const font_infos = self.hooks.fontInfoScratch();
+            try font_infos.resize(alloc, self.max);
+
             // Find the run boundary in visual order.
             var j: usize = self.i;
             while (j < bidi_run_end) : (j += 1) {
@@ -200,6 +205,7 @@ pub const RunIterator = struct {
                     run_font_style,
                     presentation,
                 );
+                font_infos.items[j] = font_info;
 
                 if (!have_font) {
                     current_font = font_info.idx;
@@ -255,14 +261,7 @@ pub const RunIterator = struct {
                 }
 
                 const presentation = presentationForCell(cell, graphemes[logical_j]);
-
-                const font_info = try self.resolveFontInfo(
-                    alloc,
-                    cell,
-                    graphemes[logical_j],
-                    run_font_style,
-                    presentation,
-                );
+                const font_info = font_infos.items[visual_idx];
 
                 if (font_info.idx != current_font) {
                     const cp = cell.codepoint();
@@ -451,7 +450,7 @@ pub const RunIterator = struct {
         return null;
     }
 
-    const FontInfo = struct {
+    pub const FontInfo = struct {
         idx: font.Collection.Index,
         fallback: ?u32 = null,
     };
