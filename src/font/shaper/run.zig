@@ -5,6 +5,7 @@ const font = @import("../main.zig");
 const shape = @import("../shape.zig");
 const terminal = @import("../../terminal/main.zig");
 const itijah = @import("itijah");
+const uucode = @import("uucode");
 const autoHash = std.hash.autoHash;
 const Hasher = std.hash.Wyhash;
 const VisualRun = itijah.VisualRun;
@@ -65,6 +66,9 @@ pub const RunIterator = struct {
     layout_ready: bool = false,
     max: usize = 0,
     visual_runs: []const VisualRun = &.{},
+    // Backing storage for visual_runs when the row has no RTL content.
+    // The iterator must not be moved once next() has been called.
+    ltr_run: [1]VisualRun = undefined,
 
     pub fn next(self: *RunIterator, alloc: Allocator) !?TextRun {
         const slice = &self.opts.cells;
@@ -342,6 +346,20 @@ pub const RunIterator = struct {
             return;
         }
 
+        // Most rows have no RTL content, and their layout is a single LTR
+        // run. Skip building bidi inputs and resolving UAX #9 for them,
+        // since this runs for every dirty row on every frame.
+        if (!needsBidi(cells[0..self.max])) {
+            self.ltr_run = .{.{
+                .visual_start = 0,
+                .logical_start = 0,
+                .len = @intCast(self.max),
+                .is_rtl = false,
+            }};
+            self.visual_runs = &self.ltr_run;
+            return;
+        }
+
         // Build bidi inputs from logical cells and derive visual runs in a
         // paragraph that is always anchored LTR (terminal line model).
         var bidi_codepoints = try alloc.alloc(u21, self.max);
@@ -482,6 +500,32 @@ pub const RunIterator = struct {
     }
 };
 
+/// Returns true if UAX #9 could resolve any cell in an LTR paragraph to a
+/// non-zero level. Only strong RTL, Arabic numbers and explicit embeddings,
+/// overrides and isolates can do that, and all of them are at or above
+/// U+0590, so rows of ASCII text cost one comparison per cell.
+fn needsBidi(cells: []const terminal.page.Cell) bool {
+    for (cells) |cell| {
+        const cp = bidiCodepoint(cell);
+        if (cp < 0x0590) continue;
+        switch (uucode.get(.bidi_class, cp)) {
+            .right_to_left,
+            .right_to_left_arabic,
+            .arabic_number,
+            .left_to_right_embedding,
+            .right_to_left_embedding,
+            .left_to_right_override,
+            .right_to_left_override,
+            .left_to_right_isolate,
+            .right_to_left_isolate,
+            .first_strong_isolate,
+            => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn bidiCodepoint(cell: terminal.page.Cell) u21 {
     const cp = cell.codepoint();
     return @intCast(if (cp == 0) ' ' else cp);
@@ -526,4 +570,59 @@ fn comparableStyle(style: terminal.Style) terminal.Style {
     s.bg_color = .none;
 
     return s;
+}
+
+fn testCells(comptime str: []const u8) [std.unicode.utf8CountCodepoints(str) catch unreachable]terminal.page.Cell {
+    @setEvalBranchQuota(10_000);
+    var cells: [std.unicode.utf8CountCodepoints(str) catch unreachable]terminal.page.Cell = undefined;
+    var it = (std.unicode.Utf8View.init(str) catch unreachable).iterator();
+    var i: usize = 0;
+    while (it.nextCodepoint()) |cp| : (i += 1) cells[i] = .init(cp);
+    return cells;
+}
+
+test "needsBidi agrees with UAX #9 for rows without RTL content" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var scratch: itijah.VisualLayoutScratch = .{};
+    defer scratch.deinit(alloc);
+
+    // Rows that reach past U+0590 without any RTL content must still
+    // resolve to a single LTR run covering the whole row.
+    inline for (.{
+        "plain ASCII: git log --oneline -5",
+        "╭─ box drawing ─╮ │ ✻ Claude Code │",
+        "漢字かなカナ 한국어 français ẞ",
+        "emoji 🌍👍🏽 and symbols ← → ✓ ★",
+    }) |str| {
+        const cells = testCells(str);
+        try testing.expect(!needsBidi(&cells));
+
+        var cps: [cells.len]u21 = undefined;
+        for (cells, &cps) |cell, *cp| cp.* = bidiCodepoint(cell);
+        const layout = try itijah.resolveVisualLayoutScratch(alloc, &scratch, &cps, .{ .base_dir = .ltr });
+        try testing.expectEqual(@as(usize, 1), layout.runs.len);
+        try testing.expect(!layout.runs[0].is_rtl);
+        try testing.expectEqual(@as(u32, cells.len), layout.runs[0].len);
+    }
+}
+
+test "needsBidi detects RTL content" {
+    const testing = std.testing;
+
+    inline for (.{
+        "Persian: سلام دنیا",
+        "Hebrew: שלום",
+        "Arabic-Indic digits: ١٢٣",
+        "RLI isolate: \u{2067}x\u{2069}",
+        "RLM mark: a\u{200F}b",
+    }) |str| {
+        const cells = testCells(str);
+        try testing.expect(needsBidi(&cells));
+    }
+
+    // Persian digits are European numbers (EN), so alone they stay LTR.
+    const digits = testCells("order ۱۴۰۵");
+    try testing.expect(!needsBidi(&digits));
 }
