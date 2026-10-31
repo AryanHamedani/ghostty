@@ -5,6 +5,7 @@ const font = @import("../main.zig");
 const shape = @import("../shape.zig");
 const terminal = @import("../../terminal/main.zig");
 const itijah = @import("itijah");
+const uucode = @import("uucode");
 const autoHash = std.hash.autoHash;
 const Hasher = std.hash.Wyhash;
 const VisualRun = itijah.VisualRun;
@@ -70,6 +71,7 @@ pub const RunIterator = struct {
     pub const Scratch = struct {
         layout: itijah.VisualLayoutScratch = .{},
         fonts: std.ArrayListUnmanaged(FontInfo) = .{},
+        ltr_run: [1]VisualRun = undefined,
 
         pub fn deinit(self: *Scratch, alloc: Allocator) void {
             self.layout.deinit(alloc);
@@ -352,6 +354,16 @@ pub const RunIterator = struct {
         }
 
         const scratch = self.hooks.scratch();
+        if (!needsBidi(cells[0..self.max])) {
+            scratch.ltr_run = .{.{
+                .visual_start = 0,
+                .logical_start = 0,
+                .len = @intCast(self.max),
+                .is_rtl = false,
+            }};
+            self.visual_runs = &scratch.ltr_run;
+            return;
+        }
 
         // Build bidi inputs from logical cells and derive visual runs in a
         // paragraph that is always anchored LTR (terminal line model).
@@ -493,6 +505,33 @@ pub const RunIterator = struct {
     }
 };
 
+/// The bidi classes that can lift a cell above level 0 in an LTR paragraph
+/// (strong RTL, Arabic numbers, explicit embeddings, overrides and
+/// isolates) never occur below the Hebrew block.
+const first_rtl_capable_codepoint = 0x0590;
+
+fn needsBidi(cells: []const terminal.page.Cell) bool {
+    for (cells) |cell| {
+        const cp = bidiCodepoint(cell);
+        if (cp < first_rtl_capable_codepoint) continue;
+        switch (uucode.get(.bidi_class, cp)) {
+            .right_to_left,
+            .right_to_left_arabic,
+            .arabic_number,
+            .left_to_right_embedding,
+            .right_to_left_embedding,
+            .left_to_right_override,
+            .right_to_left_override,
+            .left_to_right_isolate,
+            .right_to_left_isolate,
+            .first_strong_isolate,
+            => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn bidiCodepoint(cell: terminal.page.Cell) u21 {
     const cp = cell.codepoint();
     return @intCast(if (cp == 0) ' ' else cp);
@@ -537,4 +576,59 @@ fn comparableStyle(style: terminal.Style) terminal.Style {
     s.bg_color = .none;
 
     return s;
+}
+
+fn testCells(comptime str: []const u8) [std.unicode.utf8CountCodepoints(str) catch unreachable]terminal.page.Cell {
+    @setEvalBranchQuota(10_000);
+    var cells: [std.unicode.utf8CountCodepoints(str) catch unreachable]terminal.page.Cell = undefined;
+    var it = (std.unicode.Utf8View.init(str) catch unreachable).iterator();
+    var i: usize = 0;
+    while (it.nextCodepoint()) |cp| : (i += 1) cells[i] = .init(cp);
+    return cells;
+}
+
+test "needsBidi agrees with UAX #9 for rows without RTL content" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var scratch: itijah.VisualLayoutScratch = .{};
+    defer scratch.deinit(alloc);
+
+    // Rows that reach past U+0590 without any RTL content must still
+    // resolve to a single LTR run covering the whole row.
+    inline for (.{
+        "plain ASCII: git log --oneline -5",
+        "╭─ box drawing ─╮ │ ✻ Claude Code │",
+        "漢字かなカナ 한국어 français ẞ",
+        "emoji 🌍👍🏽 and symbols ← → ✓ ★",
+    }) |str| {
+        const cells = testCells(str);
+        try testing.expect(!needsBidi(&cells));
+
+        var cps: [cells.len]u21 = undefined;
+        for (cells, &cps) |cell, *cp| cp.* = bidiCodepoint(cell);
+        const layout = try itijah.resolveVisualLayoutScratch(alloc, &scratch, &cps, .{ .base_dir = .ltr });
+        try testing.expectEqual(@as(usize, 1), layout.runs.len);
+        try testing.expect(!layout.runs[0].is_rtl);
+        try testing.expectEqual(@as(u32, cells.len), layout.runs[0].len);
+    }
+}
+
+test "needsBidi detects RTL content" {
+    const testing = std.testing;
+
+    inline for (.{
+        "Persian: سلام دنیا",
+        "Hebrew: שלום",
+        "Arabic-Indic digits: ١٢٣",
+        "RLI isolate: \u{2067}x\u{2069}",
+        "RLM mark: a\u{200F}b",
+    }) |str| {
+        const cells = testCells(str);
+        try testing.expect(needsBidi(&cells));
+    }
+
+    // Persian digits are European numbers (EN), so alone they stay LTR.
+    const digits = testCells("order ۱۴۰۵");
+    try testing.expect(!needsBidi(&digits));
 }
