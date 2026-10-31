@@ -2,7 +2,6 @@ const std = @import("std");
 const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const harfbuzz = @import("harfbuzz");
-const itijah = @import("itijah");
 const bidi_helpers = @import("bidi_helpers.zig");
 const font = @import("../main.zig");
 const terminal = @import("../../terminal/main.zig");
@@ -44,8 +43,8 @@ pub const Shaper = struct {
     /// correct base cluster.
     cluster_anchor_x: std.ArrayListUnmanaged(i32) = .{},
 
-    /// Scratch reused for terminal bidi layout resolution.
-    bidi_layout_scratch: itijah.VisualLayoutScratch = .{},
+    /// Buffers the run iterator reuses across rows.
+    run_scratch: font.shape.RunIterator.Scratch = .{},
 
     const Codepoint = struct {
         cluster: u32,
@@ -107,7 +106,7 @@ pub const Shaper = struct {
         self.alloc.free(self.hb_feats);
         self.codepoints.deinit(self.alloc);
         self.cluster_anchor_x.deinit(self.alloc);
-        self.bidi_layout_scratch.deinit(self.alloc);
+        self.run_scratch.deinit(self.alloc);
     }
 
     pub fn endFrame(self: *const Shaper) void {
@@ -383,8 +382,8 @@ pub const Shaper = struct {
             self.shaper.hb_buf.guessSegmentProperties();
         }
 
-        pub fn bidiLayoutScratch(self: RunIteratorHook) *itijah.VisualLayoutScratch {
-            return &self.shaper.bidi_layout_scratch;
+        pub fn scratch(self: RunIteratorHook) *font.shape.RunIterator.Scratch {
+            return &self.shaper.run_scratch;
         }
     };
 

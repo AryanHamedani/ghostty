@@ -60,11 +60,22 @@ pub const RunIterator = struct {
     // Visual cursor within the trimmed row.
     i: usize = 0,
     // Cached row layout derived once per iterator.
-    // visual_runs is a slice owned by the scratch buffer from bidiLayoutScratch();
+    // visual_runs is a slice owned by the shaper's Scratch;
     // it remains valid as long as the scratch is not reused (i.e. within a single frame).
     layout_ready: bool = false,
     max: usize = 0,
     visual_runs: []const VisualRun = &.{},
+
+    /// Buffers the shaper keeps for the iterator and reuses across rows.
+    pub const Scratch = struct {
+        layout: itijah.VisualLayoutScratch = .{},
+        fonts: std.ArrayListUnmanaged(FontInfo) = .{},
+
+        pub fn deinit(self: *Scratch, alloc: Allocator) void {
+            self.layout.deinit(alloc);
+            self.fonts.deinit(alloc);
+        }
+    };
 
     pub fn next(self: *RunIterator, alloc: Allocator) !?TextRun {
         const slice = &self.opts.cells;
@@ -109,6 +120,9 @@ pub const RunIterator = struct {
             else
                 .{};
             const run_font_style = fontStyleForStyle(style);
+
+            const resolved_fonts = &self.hooks.scratch().fonts;
+            try resolved_fonts.resize(alloc, self.max);
 
             // Find the run boundary in visual order.
             var j: usize = self.i;
@@ -200,6 +214,7 @@ pub const RunIterator = struct {
                     run_font_style,
                     presentation,
                 );
+                resolved_fonts.items[j] = font_info;
 
                 if (!have_font) {
                     current_font = font_info.idx;
@@ -255,14 +270,7 @@ pub const RunIterator = struct {
                 }
 
                 const presentation = presentationForCell(cell, graphemes[logical_j]);
-
-                const font_info = try self.resolveFontInfo(
-                    alloc,
-                    cell,
-                    graphemes[logical_j],
-                    run_font_style,
-                    presentation,
-                );
+                const font_info = resolved_fonts.items[visual_idx];
 
                 if (font_info.idx != current_font) {
                     const cp = cell.codepoint();
@@ -343,6 +351,8 @@ pub const RunIterator = struct {
             return;
         }
 
+        const scratch = self.hooks.scratch();
+
         // Build bidi inputs from logical cells and derive visual runs in a
         // paragraph that is always anchored LTR (terminal line model).
         var bidi_codepoints = try alloc.alloc(u21, self.max);
@@ -353,7 +363,7 @@ pub const RunIterator = struct {
 
         const layout = try itijah.resolveVisualLayoutScratch(
             alloc,
-            self.hooks.bidiLayoutScratch(),
+            &scratch.layout,
             bidi_codepoints,
             .{ .base_dir = .ltr },
         );
@@ -451,7 +461,7 @@ pub const RunIterator = struct {
         return null;
     }
 
-    const FontInfo = struct {
+    pub const FontInfo = struct {
         idx: font.Collection.Index,
         fallback: ?u32 = null,
     };

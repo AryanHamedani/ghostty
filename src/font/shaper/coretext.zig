@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const macos = @import("macos");
-const itijah = @import("itijah");
 const bidi_helpers = @import("bidi_helpers.zig");
 const font = @import("../main.zig");
 const os = @import("../../os/main.zig");
@@ -86,8 +85,8 @@ pub const Shaper = struct {
     cf_release_thread: *CFReleaseThread,
     cf_release_thr: std.Thread,
 
-    /// Scratch reused for terminal bidi layout resolution.
-    bidi_layout_scratch: itijah.VisualLayoutScratch = .{},
+    /// Buffers the run iterator reuses across rows.
+    run_scratch: font.shape.RunIterator.Scratch = .{},
 
     const CellBuf = std.ArrayListUnmanaged(font.shape.Cell);
     const CodepointList = std.ArrayListUnmanaged(Codepoint);
@@ -254,7 +253,7 @@ pub const Shaper = struct {
         self.features_no_default.release();
         self.typesetter_attr_dict.release();
         self.typesetter_attr_dict_rtl.release();
-        self.bidi_layout_scratch.deinit(self.alloc);
+        self.run_scratch.deinit(self.alloc);
 
         {
             for (self.cached_fonts.items) |ft| {
@@ -790,8 +789,8 @@ pub const Shaper = struct {
             _ = self;
         }
 
-        pub fn bidiLayoutScratch(self: RunIteratorHook) *itijah.VisualLayoutScratch {
-            return &self.shaper.bidi_layout_scratch;
+        pub fn scratch(self: RunIteratorHook) *font.shape.RunIterator.Scratch {
+            return &self.shaper.run_scratch;
         }
     };
 
